@@ -19,7 +19,11 @@ import kotlinx.serialization.serializer
 @Serializable data class ParameterTypeMapping(val paramName: String, val paramType: String)
 
 @Serializable
-data class FunctionTypeMapping(val funcRetType: String, val funcParams: List<ParameterTypeMapping>)
+data class FunctionTypeMapping(
+        val funcName: String,
+        val funcRetType: String,
+        val funcParams: List<ParameterTypeMapping>
+)
 
 @Serializable
 data class ClassTypeMapping(
@@ -40,7 +44,7 @@ data class ClassTypeMapping(
                 }
             }
         */
-        var classMethods: MutableMap<String, FunctionTypeMapping>
+        var classMethods: List<FunctionTypeMapping>
 )
 
 @Serializable
@@ -62,9 +66,9 @@ fun ParseParams(method: KlassDeclaration): List<ParameterTypeMapping> {
     return output_list
 }
 
-fun ParseClassMethods(child: Ast): MutableMap<String, FunctionTypeMapping> {
+fun ParseClassMethods(child: Ast): List<FunctionTypeMapping> {
 
-    var output_map: MutableMap<String, FunctionTypeMapping> = mutableMapOf()
+    var output: List<FunctionTypeMapping> = listOf()
     // Classes with method have classBody nodes
     child.takeIf { predicate -> predicate.description.equals("classBody") }?.let { classBodyNode ->
         val classBody = classBodyNode as DefaultAstNode
@@ -81,13 +85,13 @@ fun ParseClassMethods(child: Ast): MutableMap<String, FunctionTypeMapping> {
                                 method_str.substringAfter(methodName + " ").substringBefore(")")
                     }
                     // println("" + methodName + "(" + methodParams + ") : " + methodReturnType)
-                    output_map.put(methodName, FunctionTypeMapping(methodReturnType, methodParams))
+                    output = output.plus(FunctionTypeMapping(methodName, methodReturnType, methodParams))
                 }
             }
         }
     }
 
-    return output_map
+    return output
 }
 
 fun main(args: Array<String>) {
@@ -110,7 +114,7 @@ fun main(args: Array<String>) {
                         val className = classNode.identifier?.identifier ?: "N/A"
 
                         var node_constructor_params: List<ParameterTypeMapping> = listOf()
-                        var node_methods: MutableMap<String, FunctionTypeMapping> = mutableMapOf()
+                        var node_methods: List<FunctionTypeMapping> = listOf()
                         // Take Methods
                         classNode.children.forEach { child: Ast ->
                             // Data class have KlassDeclarations with no classBody node
