@@ -10,11 +10,18 @@ import kotlinx.ast.common.AstSource.File
 import kotlinx.ast.common.ast.Ast
 import kotlinx.ast.common.ast.DefaultAstNode
 import kotlinx.ast.common.klass.KlassDeclaration
+import kotlinx.ast.common.klass.identifierName
 import kotlinx.ast.grammar.kotlin.common.summary
+import kotlinx.ast.grammar.kotlin.common.summary.Import
+import kotlinx.ast.grammar.kotlin.common.summary.PackageHeader
 import kotlinx.ast.grammar.kotlin.target.antlr.kotlin.KotlinGrammarAntlrKotlinParser
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.serializer
+import java.net.URL
+import java.net.URLClassLoader
+import java.nio.file.Path
+import java.util.jar.JarFile
+
 
 @Serializable data class ParameterTypeMapping(val paramName: String, val paramType: String)
 
@@ -48,25 +55,90 @@ data class ClassTypeMapping(
 )
 
 @Serializable
-data class ProjectTypeMapping(var projectClasses: MutableMap<String, ClassTypeMapping>)
+data class ProjectTypeMapping(
+    var projectClasses: MutableMap<String, ClassTypeMapping>,
+    var packageName : String,
+    var imports : MutableMap<String, String>,
+    var successfulParse : Boolean,
+    var errorMessages : ArrayList<String>
+)
 
-fun ParseParams(method: KlassDeclaration): List<ParameterTypeMapping> {
+val basicTypesList = listOf(
+    "Boolean",
+    "Byte",
+    "Short",
+    "Int",
+    "Long",
+    "Float",
+    "Double",
+    "Char",
+    "String",
+    "Boolean?",
+    "Byte?",
+    "Short?",
+    "Int?",
+    "Long?",
+    "Float?",
+    "Double?",
+    "Char?",
+    "Any",
+    "Any?",
+    "Unit",
+    "Nothing"
+)
+
+var PROJECT_ALREADY_BUILT = false
+var PROJECT_PATH = ""
+var JAR_PATH = ""
+fun ParseParams(method: KlassDeclaration, out : ProjectTypeMapping): List<ParameterTypeMapping> {
 
     var output_list: List<ParameterTypeMapping> = listOf()
     method.children.forEach { paramNode: Ast ->
         paramNode.takeIf { predicate -> predicate is KlassDeclaration }?.let { p ->
             val param_name = (p as KlassDeclaration).identifier?.identifier ?: "N/A"
+
             var param_ast_str = (p as KlassDeclaration).printString()
             val param_type = param_ast_str.substringAfter(param_name + " ").substringBefore(")")
 
-            output_list = output_list.plus(ParameterTypeMapping(param_name, param_type))
+//              Check if param type is a basic type or has already been defined
+            if (basicTypesList.contains(param_type) || out.projectClasses.contains(param_type)) {
+                output_list = output_list.plus(ParameterTypeMapping(param_name, param_type))
+            } else if (out.imports.contains(param_type)) {
+//              Parameter type is defined somewhere else in an import
+                if (!PROJECT_ALREADY_BUILT) {
+                    JAR_PATH = buildTemporaryProject()
+                    PROJECT_ALREADY_BUILT = true
+                }
+
+                val jarFile = JarFile(JAR_PATH)
+
+                val urls: Array<URL> = arrayOf<URL>(URL("jar:file:$JAR_PATH!/"))
+                val cl = URLClassLoader.newInstance(urls)
+
+                val c = cl.loadClass("test_models.TestModel")
+                println(c::class.java.declaredFields)
+                for (a in c.declaredFields) {
+                    println("${a.name} : ${a.type}")
+                }
+                output_list = output_list.plus(ParameterTypeMapping(param_name, param_type))
+            }
+            else {
+                out.successfulParse = false
+                out.errorMessages.add("Error: ${param_type} could not be found in list of imports and " +
+                        "is not one of the Kotlin basic types: ${basicTypesList}\n" +
+                        "Possible solutions:\n" +
+                        "1. Check if you are importing ${param_type} using star projection (*) and if so" +
+                        "use a fully qualified name instead\n" +
+                        "2. If above step does not solve your problem declare ${param_type} in the same file as the class you want to deploy")
+            }
+
         }
     }
 
     return output_list
 }
 
-fun ParseClassMethods(child: Ast): List<FunctionTypeMapping> {
+fun ParseClassMethods(child: Ast, out: ProjectTypeMapping): List<FunctionTypeMapping> {
 
     var output: List<FunctionTypeMapping> = listOf()
     // Classes with method have classBody nodes
@@ -77,7 +149,7 @@ fun ParseClassMethods(child: Ast): List<FunctionTypeMapping> {
                 val method_kl_dec = classMethodNode as KlassDeclaration
                 if (method_kl_dec.keyword.equals("fun")) {
                     val methodName = method_kl_dec.identifier?.identifier ?: "N/A"
-                    val methodParams = ParseParams(method_kl_dec)
+                    val methodParams = ParseParams(method_kl_dec, out)
                     var methodReturnType = "Void"
                     if (method_kl_dec.type.size > 0) {
                         var method_str = method_kl_dec.printString()
@@ -94,46 +166,91 @@ fun ParseClassMethods(child: Ast): List<FunctionTypeMapping> {
     return output
 }
 
+//Build project and return path of .jar file
+fun buildTemporaryProject() : String {
+    val os = System.getProperty("os.name").lowercase()
+    val extension = if (os.startsWith("win")) ".bat" else ""
+    val separator = if (os.startsWith("win")) "\\" else "/"
+    val gradlewScript = "${separator}gradlew${extension}"
+    val args = listOf(".${gradlewScript}", "--rerun-tasks", "fatJar")
+    val process = ProcessBuilder()
+    process.inheritIO()
+    process.command(args)
+    process.directory(java.io.File(PROJECT_PATH))
+    process.start().waitFor()
+
+    return Path.of(PROJECT_PATH, "app", "build", "libs", "app-standalone.jar").toString()
+}
 fun main(args: Array<String>) {
+//    if (args.size != 1) {
+//        println("Usage: ./gradlew run --args=\"<path_to_kotlin_file>\"")
+//        return
+//    }
 
-    if (args.size != 1) {
-        println("Usage: ./gradlew run --args=\"<path_to_kotlin_file>\"")
-        return
-    }
-    var output: ProjectTypeMapping = ProjectTypeMapping(mutableMapOf())
-    var source: File = AstSource.File(args.get(0))
-
+    val path = "C:\\Users\\cgeor\\work\\genezio-examples\\kotlin\\getting-started\\server\\app\\src\\main\\kotlin\\geneziokotlin\\SampleClass.kt"
+    PROJECT_PATH = "C:\\Users\\cgeor\\work\\genezio-examples\\kotlin\\getting-started\\server"
+    var output: ProjectTypeMapping = ProjectTypeMapping(mutableMapOf(), "NOT YET PARSED", mutableMapOf(), true, arrayListOf())
+    var source: File = AstSource.File(path)
     val kotlinFile = KotlinGrammarAntlrKotlinParser.parseKotlinFile(source)
     kotlinFile
-            .summary(attachRawAst = false)
-            .onSuccess { astList ->
-                astList.forEach { e ->
-                    // Take Classes
-                    e.takeIf { predicate -> predicate is KlassDeclaration }?.let { classAstNode ->
-                        val classNode = classAstNode as KlassDeclaration
-                        val className = classNode.identifier?.identifier ?: "N/A"
+        .summary(attachRawAst = false)
+        .onSuccess { astList ->
+            astList.forEach { e ->
+                // Get Package Name
+                e.takeIf { predicate -> predicate is PackageHeader }?.let {packageHeaderNode ->
+                    val headerNode = packageHeaderNode as PackageHeader
+                    output.packageName = headerNode.identifier?.identifierName().toString()
+                }
+                // Build import list
+                e.takeIf { predicate -> predicate is DefaultAstNode && predicate.description.equals("importList")  }?.let { importListNode ->
+                    val importNode = importListNode as DefaultAstNode
+                    for (import in importListNode.children as List<Import>) {
+                        var qualifiedImport = ""
+                        for (identifier in import.identifier) {
 
-                        var node_constructor_params: List<ParameterTypeMapping> = listOf()
-                        var node_methods: List<FunctionTypeMapping> = listOf()
-                        // Take Methods
-                        classNode.children.forEach { child: Ast ->
-                            // Data class have KlassDeclarations with no classBody node
-                            child.takeIf { predicate -> predicate is KlassDeclaration }?.let {
-                                val constructor_kl_dec = child as KlassDeclaration
-                                node_constructor_params = ParseParams(constructor_kl_dec)
+                            if (import.identifier.indexOf(identifier) == import.identifier.size - 1 && !import.starProjection) {
+                                qualifiedImport += identifier.identifier
+                                output.imports[identifier.identifier] = qualifiedImport
+                            } else {
+                                qualifiedImport += identifier.identifier + "."
                             }
-
-                            node_methods = ParseClassMethods(child)
                         }
-
-                        output.projectClasses.put(
-                                className,
-                                ClassTypeMapping(className, node_constructor_params, node_methods)
-                        )
                     }
                 }
-            }
-            .onFailure { errors -> errors.forEach(::println) }
+                // Take Classes
+                e.takeIf { predicate -> predicate is KlassDeclaration }?.let { classAstNode ->
+                    val classNode = classAstNode as KlassDeclaration
+                    val className = classNode.identifier?.identifier ?: "N/A"
 
-    println(Json.encodeToString(ProjectTypeMapping.serializer(), output))
+                    var node_constructor_params: List<ParameterTypeMapping> = listOf()
+                    var node_methods: List<FunctionTypeMapping> = listOf()
+                    // Take Methods
+                    classNode.children.forEach { child: Ast ->
+                        // Data class have KlassDeclarations with no classBody node
+                        child.takeIf { predicate -> predicate is KlassDeclaration }?.let {
+                            val constructor_kl_dec = child as KlassDeclaration
+                            node_constructor_params = ParseParams(constructor_kl_dec, output)
+                        }
+
+                        node_methods = ParseClassMethods(child, output)
+                    }
+
+                    output.projectClasses.put(
+                        className,
+                        ClassTypeMapping(className, node_constructor_params, node_methods)
+                    )
+                }
+            }
+        }
+        .onFailure { errors -> errors.forEach(::println) }
+
+    val prettyJson = Json { // this returns the JsonBuilder
+        prettyPrint = true
+        // optional: specify indent
+        prettyPrintIndent = " "
+    }
+
+
+    println(prettyJson.encodeToString(ProjectTypeMapping.serializer(), output))
 }
+
