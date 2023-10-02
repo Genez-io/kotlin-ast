@@ -6,7 +6,6 @@ package kotlin_ast.ast
 // AST Parsing
 // JSON Serialization for AST
 import kotlinx.ast.common.*
-import kotlinx.ast.common.AstSource.File
 import kotlinx.ast.common.ast.Ast
 import kotlinx.ast.common.ast.DefaultAstNode
 import kotlinx.ast.common.klass.KlassDeclaration
@@ -20,8 +19,10 @@ import kotlinx.serialization.json.Json
 import java.net.URL
 import java.net.URLClassLoader
 import java.nio.file.Path
+import java.util.*
 import java.util.jar.JarFile
-
+import kotlin.collections.ArrayList
+import java.io.File
 
 @Serializable data class ParameterTypeMapping(val paramName: String, val paramType: String)
 
@@ -84,8 +85,43 @@ val basicTypesList = listOf(
     "Any",
     "Any?",
     "Unit",
-    "Nothing"
+    "Nothing",
+    "Annotation",
+    "Array",
+    "BooleanArray",
+    "ByteArray",
+    "CharArray",
+    "CharSequence",
+    "Comparable",
+    "Comparator",
+    "DeepRecursiveFunction",
+    "DeepRecursiveScope",
+    "DeprecationLevel",
+    "DoubleArray",
+    "Enum",
+    "FloatArray",
+    "Function",
+    "IntArray",
+    "KotlinVersion",
+    "Lazy",
+    "LazyThreadSafetyMode",
+    "LongArray",
+    "Number",
+    "Pair",
+    "Result",
+    "String",
+    "Throwable",
+    "Triple",
+    "UByte",
+    "UByteArray",
+    "UInt",
+    "UIntArray",
+    "ULong",
+    "ULongArray",
+    "UShort",
+    "UShortArray"
 )
+
 
 var PROJECT_ALREADY_BUILT = false
 var PROJECT_PATH = ""
@@ -97,7 +133,7 @@ fun ParseParams(method: KlassDeclaration, out : ProjectTypeMapping): List<Parame
         paramNode.takeIf { predicate -> predicate is KlassDeclaration }?.let { p ->
             val param_name = (p as KlassDeclaration).identifier?.identifier ?: "N/A"
 
-            var param_ast_str = (p as KlassDeclaration).printString()
+            var param_ast_str = p.printString()
             val param_type = param_ast_str.substringAfter(param_name + " ").substringBefore(")")
 
 //              Check if param type is a basic type or has already been defined
@@ -115,12 +151,50 @@ fun ParseParams(method: KlassDeclaration, out : ProjectTypeMapping): List<Parame
                 val urls: Array<URL> = arrayOf<URL>(URL("jar:file:$JAR_PATH!/"))
                 val cl = URLClassLoader.newInstance(urls)
 
-                val c = cl.loadClass("test_models.TestModel")
-                println(c::class.java.declaredFields)
+                val c = cl.loadClass(out.imports[param_type])
+
+                var newExternalClassParams = listOf<ParameterTypeMapping>()
+                var unparsableClass = false
                 for (a in c.declaredFields) {
-                    println("${a.name} : ${a.type}")
+                    if (a.name == "Companion") {
+                        continue
+                    }
+
+                    val kotlinTypeConversion = a.type.name.replace("java.lang.", "")
+
+                    val capitalizedType = kotlinTypeConversion.replaceFirstChar {
+                        if (it.isLowerCase())
+                            it.titlecase(Locale.getDefault()) else it.toString()
+                    }
+
+                    if( !basicTypesList.contains(capitalizedType)) {
+                        unparsableClass = true
+                        break
+                    }
+
+                    newExternalClassParams = newExternalClassParams.plus(ParameterTypeMapping(a.name, capitalizedType))
                 }
+
+                if (unparsableClass) {
+                    out.successfulParse = false
+                    out.errorMessages.add("Error: ${param_type} has not been declared in this file " +
+                            "and could not be parsed succesfully.\n" +
+                            "If this class has been declared in another library a serialized string field is recommended instead!")
+                    jarFile.close()
+                    cl.close()
+                    return output_list
+                }
+                val newExternalParsedClass = ClassTypeMapping(param_type, newExternalClassParams, listOf())
+                out.projectClasses[param_type] = newExternalParsedClass
+//                val newParsedClass = ClassTypeMapping()
                 output_list = output_list.plus(ParameterTypeMapping(param_name, param_type))
+                out.errorMessages.add("Warning: ${param_type} has not been declared in this file " +
+                        "and therefore is treated as an external import.\n" +
+                        "If this class has been declared in another library there is no guarantee " +
+                        "that the parsing was successful.\n" +
+                        "A serialized string is recommended instead!")
+                jarFile.close()
+                cl.close()
             }
             else {
                 out.successfulParse = false
@@ -172,7 +246,7 @@ fun buildTemporaryProject() : String {
     val extension = if (os.startsWith("win")) ".bat" else ""
     val separator = if (os.startsWith("win")) "\\" else "/"
     val gradlewScript = "${separator}gradlew${extension}"
-    val args = listOf(".${gradlewScript}", "--rerun-tasks", "fatJar")
+    val args = listOf(".${gradlewScript}", "-q", "--rerun-tasks", "fatJar")
     val process = ProcessBuilder()
     process.inheritIO()
     process.command(args)
@@ -182,15 +256,17 @@ fun buildTemporaryProject() : String {
     return Path.of(PROJECT_PATH, "app", "build", "libs", "app-standalone.jar").toString()
 }
 fun main(args: Array<String>) {
-//    if (args.size != 1) {
-//        println("Usage: ./gradlew run --args=\"<path_to_kotlin_file>\"")
-//        return
-//    }
+    if (args.size != 1) {
+        println("Usage: java -jar \"<path_to_kotlin_file>\"")
+        return
+    }
 
-    val path = "C:\\Users\\cgeor\\work\\genezio-examples\\kotlin\\getting-started\\server\\app\\src\\main\\kotlin\\geneziokotlin\\SampleClass.kt"
-    PROJECT_PATH = "C:\\Users\\cgeor\\work\\genezio-examples\\kotlin\\getting-started\\server"
+    val path = args[0]
+    PROJECT_PATH = System.getProperty("user.dir")
+
+
     var output: ProjectTypeMapping = ProjectTypeMapping(mutableMapOf(), "NOT YET PARSED", mutableMapOf(), true, arrayListOf())
-    var source: File = AstSource.File(path)
+    var source = AstSource.File(path)
     val kotlinFile = KotlinGrammarAntlrKotlinParser.parseKotlinFile(source)
     kotlinFile
         .summary(attachRawAst = false)
@@ -250,6 +326,13 @@ fun main(args: Array<String>) {
         prettyPrintIndent = " "
     }
 
+    var buildDir = File(Path.of(PROJECT_PATH, "app", "build").toString())
+    try {
+        buildDir.deleteRecursively()
+    } catch (e : Exception)
+    {
+        println(e)
+    }
 
     println(prettyJson.encodeToString(ProjectTypeMapping.serializer(), output))
 }
