@@ -298,23 +298,27 @@ fun main(args: Array<String>) {
                     val classNode = classAstNode as KlassDeclaration
                     val className = classNode.identifier?.identifier ?: "N/A"
 
-                    var node_constructor_params: List<ParameterTypeMapping> = listOf()
-                    var node_methods: List<FunctionTypeMapping> = listOf()
-                    // Take Methods
-                    classNode.children.forEach { child: Ast ->
-                        // Data class have KlassDeclarations with no classBody node
-                        child.takeIf { predicate -> predicate is KlassDeclaration }?.let {
-                            val constructor_kl_dec = child as KlassDeclaration
-                            node_constructor_params = ParseParams(constructor_kl_dec, output)
+                    if (classNode.keyword == "class")
+                    {
+                        var node_constructor_params: List<ParameterTypeMapping> = listOf()
+                        var node_methods: List<FunctionTypeMapping> = listOf()
+                        // Take Methods
+                        classNode.children.forEach { child: Ast ->
+                            // Data class have KlassDeclarations with no classBody node
+                            child.takeIf { predicate -> predicate is KlassDeclaration }?.let {
+                                val constructor_kl_dec = child as KlassDeclaration
+                                node_constructor_params = ParseParams(constructor_kl_dec, output)
+                            }
+
+                            node_methods = ParseClassMethods(child, output)
                         }
 
-                        node_methods = ParseClassMethods(child, output)
-                    }
 
-                    output.projectClasses.put(
-                        className,
-                        ClassTypeMapping(className, node_constructor_params, node_methods)
-                    )
+                        output.projectClasses.put(
+                            className,
+                            ClassTypeMapping(className, node_constructor_params, node_methods)
+                        )
+                    }
                 }
             }
         }
