@@ -19,10 +19,11 @@ import kotlinx.serialization.json.Json
 import java.net.URL
 import java.net.URLClassLoader
 import java.nio.file.Path
-import java.util.*
 import java.util.jar.JarFile
 import kotlin.collections.ArrayList
 import java.io.File
+
+val tc = TypeConversion()
 
 @Serializable data class ParameterTypeMapping(val paramName: String, val paramType: String)
 
@@ -122,10 +123,84 @@ val basicTypesList = listOf(
     "UShortArray"
 )
 
+val excludedFields = listOf(
+    "Companion",
+    "\$childSerializers"
+)
+
 
 var PROJECT_ALREADY_BUILT = false
 var PROJECT_PATH = ""
 var JAR_PATH = ""
+
+fun ParseTypeFromJar(type: String, out : ProjectTypeMapping ): String? {
+//          Check if param type is a basic type or has already been defined
+    if (tc.kotlinToJvm[type] != null || out.projectClasses.contains(type)) {
+        return type
+    } else if (out.imports.contains(type)) {
+//          Parameter type is defined somewhere else in an import
+        if (!PROJECT_ALREADY_BUILT) {
+            JAR_PATH = buildTemporaryProject()
+            PROJECT_ALREADY_BUILT = true
+        }
+
+        val jarFile = JarFile(JAR_PATH)
+
+        val urls: Array<URL> = arrayOf<URL>(URL("jar:file:$JAR_PATH!/"))
+        val cl = URLClassLoader.newInstance(urls)
+
+        val c = cl.loadClass(out.imports[type])
+
+        var newExternalClassParams = listOf<ParameterTypeMapping>()
+        var unparsableClass = false
+        for (a in c.declaredFields) {
+            if (a.name in excludedFields) {
+                continue
+            }
+
+            val kotlinTypeConversion = tc.jvmToKotlin[a.type.name]
+
+            if( kotlinTypeConversion == null) {
+                unparsableClass = true
+                break
+            } else {
+                newExternalClassParams = newExternalClassParams.plus(ParameterTypeMapping(a.name, kotlinTypeConversion))
+            }
+        }
+
+        if (unparsableClass) {
+            out.successfulParse = false
+            out.errorMessages.add("Error: ${type} has not been declared in this file " +
+                    "and could not be parsed succesfully.\n" +
+                    "If this class has been declared in another library a serialized string field is recommended instead!")
+            jarFile.close()
+            cl.close()
+            return null
+        }
+        val newExternalParsedClass = ClassTypeMapping(type, newExternalClassParams, listOf())
+        out.projectClasses[type] = newExternalParsedClass
+        out.errorMessages.add("Warning: ${type} has not been declared in this file " +
+                "and therefore is treated as an external import.\n" +
+                "If this class has been declared in another library there is no guarantee " +
+                "that the parsing was successful.\n" +
+                "A serialized string is recommended instead!")
+        jarFile.close()
+        cl.close()
+
+        return type
+    }
+
+    out.successfulParse = false
+    out.errorMessages.add("Error: ${type} could not be found in list of imports and " +
+            "is not one of the Kotlin basic types: ${basicTypesList}\n" +
+            "Possible solutions:\n" +
+            "1. Check if you are importing ${type} using star projection (*) and if so" +
+            "use a fully qualified name instead\n" +
+            "2. If above step does not solve your problem declare ${type} in the same file as the class you want to deploy")
+
+    return null
+}
+
 fun ParseParams(method: KlassDeclaration, out : ProjectTypeMapping): List<ParameterTypeMapping> {
 
     var output_list: List<ParameterTypeMapping> = listOf()
@@ -136,76 +211,10 @@ fun ParseParams(method: KlassDeclaration, out : ProjectTypeMapping): List<Parame
             var param_ast_str = p.printString()
             val param_type = param_ast_str.substringAfter(param_name + " ").substringBefore(")")
 
-//              Check if param type is a basic type or has already been defined
-            if (basicTypesList.contains(param_type) || out.projectClasses.contains(param_type)) {
-                output_list = output_list.plus(ParameterTypeMapping(param_name, param_type))
-            } else if (out.imports.contains(param_type)) {
-//              Parameter type is defined somewhere else in an import
-                if (!PROJECT_ALREADY_BUILT) {
-                    JAR_PATH = buildTemporaryProject()
-                    PROJECT_ALREADY_BUILT = true
-                }
-
-                val jarFile = JarFile(JAR_PATH)
-
-                val urls: Array<URL> = arrayOf<URL>(URL("jar:file:$JAR_PATH!/"))
-                val cl = URLClassLoader.newInstance(urls)
-
-                val c = cl.loadClass(out.imports[param_type])
-
-                var newExternalClassParams = listOf<ParameterTypeMapping>()
-                var unparsableClass = false
-                for (a in c.declaredFields) {
-                    if (a.name == "Companion") {
-                        continue
-                    }
-
-                    val kotlinTypeConversion = a.type.name.replace("java.lang.", "")
-
-                    val capitalizedType = kotlinTypeConversion.replaceFirstChar {
-                        if (it.isLowerCase())
-                            it.titlecase(Locale.getDefault()) else it.toString()
-                    }
-
-                    if( !basicTypesList.contains(capitalizedType)) {
-                        unparsableClass = true
-                        break
-                    }
-
-                    newExternalClassParams = newExternalClassParams.plus(ParameterTypeMapping(a.name, capitalizedType))
-                }
-
-                if (unparsableClass) {
-                    out.successfulParse = false
-                    out.errorMessages.add("Error: ${param_type} has not been declared in this file " +
-                            "and could not be parsed succesfully.\n" +
-                            "If this class has been declared in another library a serialized string field is recommended instead!")
-                    jarFile.close()
-                    cl.close()
-                    return output_list
-                }
-                val newExternalParsedClass = ClassTypeMapping(param_type, newExternalClassParams, listOf())
-                out.projectClasses[param_type] = newExternalParsedClass
-//                val newParsedClass = ClassTypeMapping()
-                output_list = output_list.plus(ParameterTypeMapping(param_name, param_type))
-                out.errorMessages.add("Warning: ${param_type} has not been declared in this file " +
-                        "and therefore is treated as an external import.\n" +
-                        "If this class has been declared in another library there is no guarantee " +
-                        "that the parsing was successful.\n" +
-                        "A serialized string is recommended instead!")
-                jarFile.close()
-                cl.close()
+            val parseResult = ParseTypeFromJar(param_type, out)
+            if(parseResult != null) {
+                output_list = output_list.plus(ParameterTypeMapping(param_name, parseResult))
             }
-            else {
-                out.successfulParse = false
-                out.errorMessages.add("Error: ${param_type} could not be found in list of imports and " +
-                        "is not one of the Kotlin basic types: ${basicTypesList}\n" +
-                        "Possible solutions:\n" +
-                        "1. Check if you are importing ${param_type} using star projection (*) and if so" +
-                        "use a fully qualified name instead\n" +
-                        "2. If above step does not solve your problem declare ${param_type} in the same file as the class you want to deploy")
-            }
-
         }
     }
 
@@ -224,14 +233,12 @@ fun ParseClassMethods(child: Ast, out: ProjectTypeMapping): List<FunctionTypeMap
                 if (method_kl_dec.keyword.equals("fun")) {
                     val methodName = method_kl_dec.identifier?.identifier ?: "N/A"
                     val methodParams = ParseParams(method_kl_dec, out)
-                    var methodReturnType = "Void"
-                    if (method_kl_dec.type.size > 0) {
-                        var method_str = method_kl_dec.printString()
-                        methodReturnType =
-                                method_str.substringAfter(methodName + " ").substringBefore(")")
+                    val returnIdentifier = method_kl_dec.type[0].identifier
+                    var methodReturnType = ParseTypeFromJar(returnIdentifier, out)
+                    if (methodReturnType != null) {
+                        output = output.plus(FunctionTypeMapping(methodName, methodReturnType, methodParams))
                     }
-                    // println("" + methodName + "(" + methodParams + ") : " + methodReturnType)
-                    output = output.plus(FunctionTypeMapping(methodName, methodReturnType, methodParams))
+
                 }
             }
         }
@@ -263,7 +270,6 @@ fun main(args: Array<String>) {
 
     val path = args[0]
     PROJECT_PATH = System.getProperty("user.dir")
-
 
     var output: ProjectTypeMapping = ProjectTypeMapping(mutableMapOf(), "NOT YET PARSED", mutableMapOf(), true, arrayListOf())
     var source = AstSource.File(path)
