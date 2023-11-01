@@ -31,6 +31,7 @@ dependencies {
     implementation("com.google.guava:guava:31.1-jre")
     implementation("com.github.kotlinx.ast:grammar-kotlin-parser-antlr-kotlin:0.1.0")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.5.0")
+    implementation(kotlin("reflect"))
 }
 
 // Apply a specific Java toolchain to ease working on different environments.
